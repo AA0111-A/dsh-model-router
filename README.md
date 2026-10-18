@@ -86,7 +86,7 @@ flowchart LR
 ### 安装
 
 ```bash
-git clone https://github.com/<YOUR_GITHUB_USER>/dsh-model-router.git
+git clone https://github.com/AA0111-A/dsh-model-router.git
 cd dsh-model-router
 ```
 
@@ -264,4 +264,4 @@ cordis.patch.yml    # bundle 声明与默认配置
 
 ## License
 
-[MIT](LICENSE) © `<YOUR_NAME>`
+[MIT](LICENSE) © `AA0111-A`

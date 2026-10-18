@@ -15,12 +15,12 @@
     "llm"
   ],
   "license": "MIT",
-  "author": "<YOUR_NAME>",
+  "author": "AA0111-A",
   "repository": {
     "type": "git",
-    "url": "https://github.com/<YOUR_GITHUB_USER>/dsh-model-router.git"
+    "url": "https://github.com/AA0111-A/dsh-model-router.git"
   },
-  "homepage": "https://github.com/<YOUR_GITHUB_USER>/dsh-model-router#readme",
+  "homepage": "https://github.com/AA0111-A/dsh-model-router#readme",
   "engines": {
     "node": ">=20"
   },
