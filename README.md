@@ -221,13 +221,15 @@ tail -f .model-router/router-trace.jsonl | jq '.'
 
 ## 安全
 
+- **只读图片，永不读非图片**：插件只识别 `.png/.jpg/.jpeg/.webp/.gif`；`.ini/.txt/.log/.env/.key/.pem` 等文件不会进入插件读取链路。读取前还会校验文件头（magic bytes），把 `secret.ini` 改名成 `secret.png` 也会被拒绝。
 - **无 shell 执行**：外部 CLI 探测使用 `spawn(command, ['--version'], { shell: false })`，命令来自插件配置并拒绝 shell 元字符、控制字符、`..` 片段。
-- **图片路径沙箱**：只接受绝对路径；拒绝 `..` 穿越、UNC/设备路径、NTFS 备用数据流（`file.png:stream`）、控制字符；用 `realpath` 解析软链接后可选地限制在 `allowedRoots` 内。
+- **图片路径沙箱**：只接受绝对路径；拒绝 `..` 穿越、UNC/设备路径、NTFS 备用数据流（`file.png:stream`）、控制字符；用 `realpath` 解析软链接后限制在 `allowedRoots` 内；`denyRoots` 默认拒绝 `C:\Windows`、`C:\Program Files`、`C:\ProgramData` 等系统目录。
+- **主 AI 安全指令**：主对话与子代理都会收到安全边界提示——拒绝读取/打印非图片文件，禁止绕过委派或路由直接读取敏感文件。
 - **正则与输入上限**：所有扫描正则使用有界字符类，任务文本在特征提取前截断（20k/100k），1 MB 恶意输入实测 1–2 ms。
 - **防符号链接覆盖**：缓存写入使用随机临时名 + `wx` 独占创建，再原子 rename。
 - **端点校验**：外部端点必须是 `http(s)` 且不带内嵌凭据。
 
-信任边界：插件配置（`command`、`cacheFile`、`endpoint`、`allowedRoots`）视为主机管理员信任的输入；模型输出与提示词注入不在本插件的信任边界内。
+信任边界：插件配置（`command`、`cacheFile`、`endpoint`、`allowedRoots`、`denyRoots`）视为主机管理员信任的输入；模型输出与提示词注入不在本插件的信任边界内。主 AI 的工具权限最终由 DSH 的沙箱/工具策略决定，提示词指令属于纵深防御的一层。
 
 ## 已知限制
 

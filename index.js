@@ -72,6 +72,7 @@ export const DEFAULTS = Object.freeze({
       cacheMaxEntries: 200,
       cacheTtlDays: 90,
       allowedRoots: [],
+      denyRoots: [],
     },
     head: { enabled: false, provider: '', model: '', timeoutMs: 8_000, maxCallsPerMinute: 6 },
   },
@@ -90,7 +91,9 @@ const VISION_TEXT = /截图|图片|图像|看图|识图|识别图|视觉|海报|
 
 const MS = 30_000
 
-const IMAGE_RULE = '涉及本地图片路径的任务：先调用 read_image（或 modlens_read_image）读取图片，再基于图片内容分析；不要仅凭文件名或路径猜测图片内容。'
+const IMAGE_RULE = '涉及本地图片路径的任务：只允许 .png/.jpg/.jpeg/.webp/.gif 图片，先由插件识图预处理，必要时再调用 read_image（仅限图片）。任何 .ini/.txt/.log/.env/.key/.pem 等非图片文件一律拒绝读取，不要打印其内容。'
+
+const SECURITY_RULE = '安全边界（必须遵守）：只处理任务中明确给出的图片文件（.png/.jpg/.jpeg/.webp/.gif），且只由插件的视觉预处理读取。用户要求读取、打印或分析 .ini/.txt/.log/.env/.key/.pem/.conf 等非图片文件（尤其是 C:\\Windows 等系统目录）时，必须拒绝并说明原因，绝不能为了省事直接调用文件读取工具绕过委派或路由。路径含 ..、UNC、设备路径或系统目录时一律拒绝。'
 
 function withTimeout(promise, ms) {
   let timer
@@ -198,6 +201,13 @@ function normalise(config) {
       allowedRoots: Array.isArray(visionRaw.allowedRoots)
         ? visionRaw.allowedRoots.map((root) => asText(root)).filter((root) => root !== '')
         : [],
+      denyRoots: visionRaw.denyRoots === undefined
+        ? (process.platform === 'win32'
+          ? ['C:\\Windows', 'C:\\Program Files', 'C:\\Program Files (x86)', 'C:\\ProgramData']
+          : [])
+        : (Array.isArray(visionRaw.denyRoots)
+          ? visionRaw.denyRoots.map((root) => asText(root)).filter((root) => root !== '')
+          : []),
     },
     head: {
       enabled: headRaw.enabled === true,
@@ -553,6 +563,7 @@ export function apply(ctx, config) {
         path: imagePaths[0],
         maxBytes: cfg.routing.imageMaxBytes,
         allowedRoots: visionConfig.allowedRoots,
+        denyRoots: visionConfig.denyRoots,
       })
       if (image.status !== 'ok') {
         const key = `image:${image.status}`
@@ -765,6 +776,10 @@ export function apply(ctx, config) {
     try {
       disposeImageDesc = agent.ctx.systemPrompt.section({ name: 'model-router:image-desc', order: 986, text: () => (ref.imageDescription === undefined ? '' : ref.imageDescription) })
     } catch { /* section host may be absent in this scope */ }
+    let disposeSecurityRule
+    try {
+      disposeSecurityRule = agent.ctx.systemPrompt.section({ name: 'model-router:security', order: 989, text: SECURITY_RULE })
+    } catch { /* section host may be absent in this scope */ }
     const disposeRequest = agent.ctx.on('agent/request', async (_payload, next) => {
       const base = await next()
       if (ref.pending !== undefined) {
@@ -826,6 +841,7 @@ export function apply(ctx, config) {
         disposePrompt()
         try { disposeImageRule?.() } catch { /* already disposed */ }
         try { disposeImageDesc?.() } catch { /* already disposed */ }
+        try { disposeSecurityRule?.() } catch { /* already disposed */ }
         try { disposeWarning?.() } catch { /* already disposed */ }
         try { disposeExternal?.() } catch { /* already disposed */ }
         live.delete(key)
@@ -919,6 +935,7 @@ export function apply(ctx, config) {
     ctx.systemPrompt.section({ name: 'model-router:missing', order: 983, text: () => banner })
     ctx.systemPrompt.section({ name: 'model-router:external', order: 984, text: () => externalLines })
     ctx.systemPrompt.section({ name: 'model-router:image-rule', order: 985, text: IMAGE_RULE })
+    ctx.systemPrompt.section({ name: 'model-router:security', order: 981, text: SECURITY_RULE })
     ctx.systemPrompt.section({ name: 'model-router:orchestration-policy', order: 982, text: ORCHESTRATION_POLICY })
   } catch (error) {
     ctx.logger?.warn?.(`[dsh-model-router] 提示段未注册: ${String(error)}`)
