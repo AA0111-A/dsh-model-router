@@ -1,6 +1,6 @@
 {
   "name": "dsh-model-router",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "private": false,
   "type": "module",
   "description": "Local-first, token-saving model routing for DSH subagents: capability pool, content-hash decision cache, one-shot head adjudication, plugin-side vision preprocessing and automatic delegation.",

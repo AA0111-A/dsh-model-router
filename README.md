@@ -175,7 +175,7 @@ logFile: './.model-router/router-trace.jsonl'
 | `routing.ambiguityMargin` | 头领触发阈值 |
 | `routing.decisionTimeoutMs` | 等待路由决策的硬超时 |
 | `routing.cacheFile` / `cacheMaxEntries` / `cacheTtlDays` | 决策缓存；带配置指纹，改池自动失效 |
-| `routing.visionPreprocess.*` | 图片预处理：模型顺序、超时、输出长度、独立缓存 |
+| `routing.visionPreprocess.*` | 图片预处理：模型顺序、超时、输出长度、独立缓存、`allowedRoots`（可选，限定图片目录） |
 | `routing.imageMaxBytes` | 图片大小上限，超限跳过预处理 |
 | `routing.head.*` | 头领开关、模型、超时、限流 |
 | `orchestration.*` | 自动编排：开关、子代理禁套娃、默认委派工具 |
@@ -218,6 +218,16 @@ tail -f .model-router/router-trace.jsonl | jq '.'
 - 仓库 `.gitignore` 已忽略缓存、日志与 `.env`。
 
 ---
+
+## 安全
+
+- **无 shell 执行**：外部 CLI 探测使用 `spawn(command, ['--version'], { shell: false })`，命令来自插件配置并拒绝 shell 元字符、控制字符、`..` 片段。
+- **图片路径沙箱**：只接受绝对路径；拒绝 `..` 穿越、UNC/设备路径、NTFS 备用数据流（`file.png:stream`）、控制字符；用 `realpath` 解析软链接后可选地限制在 `allowedRoots` 内。
+- **正则与输入上限**：所有扫描正则使用有界字符类，任务文本在特征提取前截断（20k/100k），1 MB 恶意输入实测 1–2 ms。
+- **防符号链接覆盖**：缓存写入使用随机临时名 + `wx` 独占创建，再原子 rename。
+- **端点校验**：外部端点必须是 `http(s)` 且不带内嵌凭据。
+
+信任边界：插件配置（`command`、`cacheFile`、`endpoint`、`allowedRoots`）视为主机管理员信任的输入；模型输出与提示词注入不在本插件的信任边界内。
 
 ## 已知限制
 

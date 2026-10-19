@@ -37,6 +37,9 @@
             cacheFile: './.model-router/vision_cache.json'
             cacheMaxEntries: 200
             cacheTtlDays: 90
+            # 留空 = 只做路径安全校验（禁 .. / UNC / ADS / 控制字符）；
+            # 填入目录后，解析软链接后仍必须位于这些目录内。
+            allowedRoots: []
           head:
             enabled: true
             provider: deepseek-official

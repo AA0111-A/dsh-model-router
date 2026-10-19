@@ -71,6 +71,7 @@ export const DEFAULTS = Object.freeze({
       cacheFile: '',
       cacheMaxEntries: 200,
       cacheTtlDays: 90,
+      allowedRoots: [],
     },
     head: { enabled: false, provider: '', model: '', timeoutMs: 8_000, maxCallsPerMinute: 6 },
   },
@@ -194,6 +195,9 @@ function normalise(config) {
       cacheFile: asText(visionRaw.cacheFile),
       cacheMaxEntries: number(visionRaw.cacheMaxEntries, 200),
       cacheTtlDays: number(visionRaw.cacheTtlDays, 90),
+      allowedRoots: Array.isArray(visionRaw.allowedRoots)
+        ? visionRaw.allowedRoots.map((root) => asText(root)).filter((root) => root !== '')
+        : [],
     },
     head: {
       enabled: headRaw.enabled === true,
@@ -544,7 +548,12 @@ export function apply(ctx, config) {
     const imagePaths = cfg.routing.visionImages ? extractImagePaths(text) : []
     let image = { status: features.hasImage ? 'attached' : 'none' }
     if (image.status === 'none' && imagePaths.length > 0) {
-      image = await prepareImage({ ctx, path: imagePaths[0], maxBytes: cfg.routing.imageMaxBytes })
+      image = await prepareImage({
+        ctx,
+        path: imagePaths[0],
+        maxBytes: cfg.routing.imageMaxBytes,
+        allowedRoots: visionConfig.allowedRoots,
+      })
       if (image.status !== 'ok') {
         const key = `image:${image.status}`
         if (cfg.warnMissing && !warned.has(key)) {
