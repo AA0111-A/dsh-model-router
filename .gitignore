@@ -3,6 +3,7 @@ node_modules/
 .pnpm-store/
 dist/
 .cache/
+package-lock.json
 
 # environment & secrets
 .env
