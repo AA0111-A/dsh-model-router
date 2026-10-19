@@ -1,0 +1,25 @@
+# dependencies
+node_modules/
+.pnpm-store/
+dist/
+.cache/
+
+# environment & secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# local runtime data (created by the router)
+.model-router/
+routing_cache.json
+vision_cache.json
+*.jsonl
+*.log
+
+# editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Model Router",
+    "description": "Picks the cheapest suitable model when handing work out, and flags better models that are not wired up locally."
+  }
+}

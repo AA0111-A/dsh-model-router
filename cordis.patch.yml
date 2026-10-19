@@ -1,0 +1,71 @@
+- insert:
+    - id: dsh-model-router
+      name: 'dsh-model-router'
+      config:
+        roles:
+          planner: { provider: deepseek-official, model: deepseek-v4-pro, reasoningEffort: max }
+          explore: { provider: deepseek-official, model: deepseek-flash, reasoningEffort: low }
+          patch:   { provider: kimi, model: kimi-k2.7-code, reasoningEffort: high }
+        tiers:
+          easy:   { provider: deepseek-official, model: deepseek-flash, reasoningEffort: low }
+          medium: { provider: deepseek-official, model: deepseek-flash, reasoningEffort: high }
+          hard:   { provider: deepseek-official, model: deepseek-v4-pro, reasoningEffort: max }
+        pool:
+          - { provider: deepseek-official, model: deepseek-flash, tags: [机械执行, 简单问答], signals: [搜索, 查找, 整理, 统计, 列出, 翻译, 格式化], cost: 1 }
+          - { provider: deepseek-official, model: deepseek-v4-pro, tags: [复杂逻辑, 架构设计], signals: [设计, 架构, 重构, 迁移, 并发, 根因, 方案], cost: 3 }
+          - { provider: kimi, model: kimi-k2.7-code, tags: [代码实现, 快速代码补全], signals: [实现, 修复, 补测试, 写代码, 编译, 报错], cost: 2 }
+          - { provider: deepseek-official, model: deepseek-flash, tags: [视觉识别, 图表解析], signals: [截图, 图片, 看图, 识图, 视觉, 图表], cost: 1 }
+          - { provider: qwen, model: qwen3-vl-plus, tags: [视觉识别, 图表解析], signals: [截图, 图片, 看图, 识图, 视觉, 图表], cost: 2 }
+          - { provider: kimi, model: kimi-k3, tags: [长文本处理, 长上下文], signals: [长文, 摘要, 总结, 翻译], cost: 3 }
+        routing:
+          mode: pool
+          jaccardThreshold: 0.62
+          ambiguityMargin: 0.8
+          decisionTimeoutMs: 25000
+          imageMaxBytes: 5242880
+          visionImages: true
+          cacheFile: './.model-router/routing_cache.json'
+          cacheMaxEntries: 300
+          cacheTtlDays: 30
+          visionPreprocess:
+            enabled: true
+            models:
+              - { provider: deepseek-official, model: deepseek-flash }
+              - { provider: qwen, model: qwen3-vl-plus }
+            maxOutputTokens: 300
+            timeoutMs: 20000
+            cacheFile: './.model-router/vision_cache.json'
+            cacheMaxEntries: 200
+            cacheTtlDays: 90
+          head:
+            enabled: true
+            provider: deepseek-official
+            model: deepseek-v4-pro
+            timeoutMs: 8000
+            maxCallsPerMinute: 6
+        vision:
+          provider: ''
+          model: ''
+        visionAuto: true
+        orchestration:
+          enabled: true
+          childNoDelegation: true
+          healTool: subagent
+        external:
+          codex:
+            enabled: true
+            provider: codex
+            tool: subagent_codex
+            command: ''
+            endpoint: 'http://127.0.0.1:15721/v1'
+            roles: [patch]
+            checkTimeoutMs: 4000
+        hardThreshold: 3
+        easyThreshold: -1
+        warnMissing: true
+        providerKeys:
+          kimi: KIMI_API_KEY
+          qwen: QWEN_API_KEY
+          anthropic: ANTHROPIC_API_KEY
+          openai: OPENAI_API_KEY
+        logFile: './.model-router/router-trace.jsonl'
