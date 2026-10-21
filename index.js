@@ -57,7 +57,7 @@ export const DEFAULTS = Object.freeze({
     cacheMaxEntries: 300,
     cacheTtlDays: 30,
     ambiguityMargin: 0.8,
-    decisionTimeoutMs: 45_000,
+    decisionTimeoutMs: 55_000,
     imageMaxBytes: 5 * 1024 * 1024,
     visionImages: true,
     visionPreprocess: {
@@ -187,7 +187,7 @@ function normalise(config) {
     cacheMaxEntries: number(routingRaw.cacheMaxEntries, 300),
     cacheTtlDays: number(routingRaw.cacheTtlDays, 30),
     ambiguityMargin: number(routingRaw.ambiguityMargin, 0.8),
-    decisionTimeoutMs: number(routingRaw.decisionTimeoutMs, 25_000),
+    decisionTimeoutMs: number(routingRaw.decisionTimeoutMs, DEFAULTS.routing.decisionTimeoutMs),
     imageMaxBytes: number(routingRaw.imageMaxBytes, 5 * 1024 * 1024),
     visionImages: routingRaw.visionImages === undefined ? true : Boolean(routingRaw.visionImages),
     visionPreprocess: {
@@ -624,17 +624,17 @@ export function apply(ctx, config) {
     const head = cfg.routing.head
     let headFailure
     if (head.enabled && head.provider !== '' && head.model !== '' && ranked.length > 1) {
-      const now = Date.now()
-      while (headCalls.length > 0 && now - headCalls[0] >= 60_000) headCalls.shift()
-      if (headCalls.length < head.maxCallsPerMinute) {
-        headCalls.push(now)
-        const candidates = ranked.slice(0, 8).map((item) => item.entry)
-        // Single-flight: concurrent children with the same task signature share
-        // one head call instead of each paying for one.
-        let outcome
-        if (headInflight.has(id)) {
-          outcome = await headInflight.get(id)
-        } else {
+      const candidates = ranked.slice(0, 8).map((item) => item.entry)
+      let outcome
+      if (headInflight.has(id)) {
+        // Join an in-flight adjudication for the same signature without
+        // consuming a rate-limit slot.
+        outcome = await headInflight.get(id)
+      } else {
+        const now = Date.now()
+        while (headCalls.length > 0 && now - headCalls[0] >= 60_000) headCalls.shift()
+        if (headCalls.length < head.maxCallsPerMinute) {
+          headCalls.push(now)
           const task = askHead({ llm: ctx.get('llm'), head, text, candidates, timeoutMs: head.timeoutMs })
           headInflight.set(id, task)
           try {
@@ -642,15 +642,15 @@ export function apply(ctx, config) {
           } finally {
             headInflight.delete(id)
           }
+        } else {
+          headFailure = 'rate-limited'
         }
-        if (outcome?.chosen !== undefined) {
-          cache.remember(features, id, outcome.chosen, 'head')
-          return { slot: { provider: outcome.chosen.provider, model: outcome.chosen.model }, via: 'head', features, id, candidates, image }
-        }
-        headFailure = outcome?.error ?? 'unknown'
-      } else {
-        headFailure = 'rate-limited'
       }
+      if (outcome?.chosen !== undefined) {
+        cache.remember(features, id, outcome.chosen, 'head')
+        return { slot: { provider: outcome.chosen.provider, model: outcome.chosen.model }, via: 'head', features, id, candidates, image }
+      }
+      headFailure = outcome?.error ?? headFailure ?? 'unknown'
     }
     if (ranked.length > 0) {
       const best = ranked[0].entry
@@ -758,6 +758,8 @@ export function apply(ctx, config) {
         // this step's prompt is assembled. Computing it only on inbox insertion
         // made the prompt show the *previous* message's verdict (one-turn lag).
         let lastTurn
+        let lastVerdict
+        const followUp = /再来一次|再查一次|再检查|重新查|重新检查|继续查|复测|再跑|再审查|重新审|rerun|recheck|again/i
         const preStep = agent.ctx.on('agent/pre-step', async (payload, next) => {
           const decision = await next()
           if (!cfg.orchestration.enabled) return decision
@@ -767,9 +769,21 @@ export function apply(ctx, config) {
           const lastUser = [...messages].reverse().find((message) => message?.role === 'user')
           const text = lastUser === undefined ? '' : textOf(lastUser)
           if (text === '') return decision
-          const assessment = assessTask(text, lastUser)
+          let assessment = assessTask(text, lastUser)
+          // A terse follow-up like "改过了，再查一次" is context-heavy work:
+          // when the previous turn was a heavy delegation, keep it heavy instead
+          // of downgrading it to a light direct answer.
+          if (assessment.verdict !== 'heavy' && lastVerdict === 'heavy' && text.length < 60 && followUp.test(text)) {
+            assessment = {
+              ...assessment,
+              verdict: 'heavy',
+              score: Math.max(assessment.score, 3),
+              reasons: [...assessment.reasons, '延续上轮重活'],
+            }
+          }
           verdicts.set(key, assessment)
           lastTurn = turn
+          lastVerdict = assessment.verdict
           trace({
             event: 'orchestration',
             session: key,

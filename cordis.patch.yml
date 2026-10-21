@@ -24,7 +24,7 @@
           mode: pool
           jaccardThreshold: 0.62
           ambiguityMargin: 0.8
-          decisionTimeoutMs: 45000
+          decisionTimeoutMs: 55000
           imageMaxBytes: 5242880
           visionImages: true
           cacheFile: './.model-router/routing_cache.json'
