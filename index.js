@@ -732,7 +732,7 @@ export function apply(ctx, config) {
           text: '你是执行者：只完成交给你的任务，不要再调用 subagent / spawn_teammate 派生新的代理或团队；完成后直接汇报结果。',
         })
       } else {
-        dispose = agent.ctx.systemPrompt.section({
+        const section = agent.ctx.systemPrompt.section({
           name: 'model-router:orchestration',
           order: 987,
           text: () => {
@@ -740,6 +740,40 @@ export function apply(ctx, config) {
             return assessment === undefined ? '' : verdictText(assessment, { healTool: cfg.orchestration.healTool })
           },
         })
+        // Compute the verdict in pre-step, i.e. after the inbox event but before
+        // this step's prompt is assembled. Computing it only on inbox insertion
+        // made the prompt show the *previous* message's verdict (one-turn lag).
+        let lastTurn
+        const preStep = agent.ctx.on('agent/pre-step', async (payload, next) => {
+          const decision = await next()
+          if (!cfg.orchestration.enabled) return decision
+          const turn = payload?.turn
+          if (turn !== undefined && turn === lastTurn) return decision
+          const messages = Array.isArray(payload?.messages) ? payload.messages : []
+          const lastUser = [...messages].reverse().find((message) => message?.role === 'user')
+          const text = lastUser === undefined ? '' : textOf(lastUser)
+          if (text === '') return decision
+          const assessment = assessTask(text, lastUser)
+          verdicts.set(key, assessment)
+          lastTurn = turn
+          trace({
+            event: 'orchestration',
+            session: key,
+            turn: turn ?? null,
+            verdict: assessment.verdict,
+            score: assessment.score,
+            reasons: assessment.reasons,
+            coding: assessment.coding === true,
+            image: assessment.image,
+            head: text.slice(0, 100).replaceAll('\n', ' '),
+          })
+          ctx.logger?.info?.(`[dsh-model-router] orchestration=${assessment.verdict} score=${assessment.score}（${assessment.reasons.join('、') || '无特征'}）`)
+          return decision
+        })
+        dispose = () => {
+          try { section?.() } catch { /* already disposed */ }
+          try { preStep?.() } catch { /* already disposed */ }
+        }
       }
     } catch {
       return
@@ -958,23 +992,8 @@ export function apply(ctx, config) {
   }))
 
   ctx.on('agent/inbox/inserted', guarded('agent/inbox/inserted', ({ agent, message }) => {
+    if (!isManaged(agent)) return
     const text = textOf(message)
-    if (!isManaged(agent)) {
-      if (cfg.orchestration.enabled && text !== '') {
-        const assessment = assessTask(text, message)
-        verdicts.set(String(agent.id), assessment)
-        trace({
-          event: 'orchestration',
-          session: String(agent.id),
-          verdict: assessment.verdict,
-          score: assessment.score,
-          reasons: assessment.reasons,
-          image: assessment.image,
-        })
-        ctx.logger?.info?.(`[dsh-model-router] orchestration=${assessment.verdict} score=${assessment.score}（${assessment.reasons.join('、') || '无特征'}）`)
-      }
-      return
-    }
     const entry = install(agent)
     if (entry.decided) return
     if (text === '') return
