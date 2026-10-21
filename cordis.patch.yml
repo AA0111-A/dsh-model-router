@@ -12,6 +12,8 @@
           hard:   { provider: deepseek-official, model: deepseek-v4-pro, reasoningEffort: max }
         pool:
           - { provider: deepseek-official, model: deepseek-flash, tags: [机械执行, 简单问答], signals: [搜索, 查找, 整理, 统计, 列出, 翻译, 格式化], cost: 1 }
+          # 读代码/审查/排查用便宜模型；只有真正的深水区（重构/并发/架构）才上 pro
+          - { provider: deepseek-official, model: deepseek-flash, tags: [代码审查, 代码阅读], signals: [审查, 排查, 检查, 阅读, 通读, 定位, 并发, 根因, review], cost: 1 }
           - { provider: deepseek-official, model: deepseek-v4-pro, tags: [复杂逻辑, 架构设计], signals: [设计, 架构, 重构, 迁移, 并发, 根因, 方案], cost: 3 }
           - { provider: kimi, model: kimi-k2.7-code, tags: [代码实现, 快速代码补全], signals: [实现, 修复, 补测试, 写代码, 编译, 报错], cost: 2 }
           - { provider: deepseek-official, model: deepseek-flash, tags: [视觉识别, 图表解析], signals: [截图, 图片, 看图, 识图, 视觉, 图表], cost: 1 }
