@@ -57,7 +57,7 @@ export const DEFAULTS = Object.freeze({
     cacheMaxEntries: 300,
     cacheTtlDays: 30,
     ambiguityMargin: 0.8,
-    decisionTimeoutMs: 25_000,
+    decisionTimeoutMs: 45_000,
     imageMaxBytes: 5 * 1024 * 1024,
     visionImages: true,
     visionPreprocess: {
@@ -505,6 +505,7 @@ export function apply(ctx, config) {
     logger: ctx.logger,
   })
   const headCalls = []
+  const headInflight = new Map()
   const poolAvailable = () => cfg.pool.filter((entry) => catalog.status(entry.provider).ok)
   const poolModelKeys = new Set(cfg.pool.map((entry) => `${entry.provider}/${entry.model}`))
   // A cached decision may only reuse a model that still exists in the pool and
@@ -628,7 +629,20 @@ export function apply(ctx, config) {
       if (headCalls.length < head.maxCallsPerMinute) {
         headCalls.push(now)
         const candidates = ranked.slice(0, 8).map((item) => item.entry)
-        const outcome = await askHead({ llm: ctx.get('llm'), head, text, candidates, timeoutMs: head.timeoutMs })
+        // Single-flight: concurrent children with the same task signature share
+        // one head call instead of each paying for one.
+        let outcome
+        if (headInflight.has(id)) {
+          outcome = await headInflight.get(id)
+        } else {
+          const task = askHead({ llm: ctx.get('llm'), head, text, candidates, timeoutMs: head.timeoutMs })
+          headInflight.set(id, task)
+          try {
+            outcome = await task
+          } finally {
+            headInflight.delete(id)
+          }
+        }
         if (outcome?.chosen !== undefined) {
           cache.remember(features, id, outcome.chosen, 'head')
           return { slot: { provider: outcome.chosen.provider, model: outcome.chosen.model }, via: 'head', features, id, candidates, image }
@@ -899,6 +913,7 @@ export function apply(ctx, config) {
   // so startup evaluation waits for them and re-runs when adapters change —
   // otherwise every restart would report configured models as "unregistered".
   let startupTimer
+  let startupRunning = false
   const waitForProviders = async () => {
     for (let attempt = 0; attempt < 40; attempt += 1) {
       try {
@@ -911,6 +926,14 @@ export function apply(ctx, config) {
     }
   }
   const evaluateStartup = async () => {
+    // Re-entrancy guard: adapter events can fire while an evaluation is still
+    // running; queue one follow-up pass instead of interleaving snapshots.
+    if (startupRunning) {
+      scheduleStartup()
+      return
+    }
+    startupRunning = true
+    try {
     warnings.length = 0
     banner = ''
     warned.clear()
@@ -950,6 +973,9 @@ export function apply(ctx, config) {
     trace({ event: 'vision-catalog', count: models.length, models: models.slice(0, 8) })
     if (models.length === 0 && cfg.vision.provider === '' && cfg.warnMissing) {
       noteWarning('⚠️ 未检测到声明 image 输入的模型；涉及图片的任务会退回文本模型。')
+    }
+    } finally {
+      startupRunning = false
     }
   }
   const scheduleStartup = () => {
@@ -1004,6 +1030,9 @@ export function apply(ctx, config) {
     const tier = classifyTier(text, cfg)
 
     const finish = (slot, extra) => {
+      // The agent may be disposed while a vision/head decision is in flight;
+      // never write back to a dead entry.
+      if (live.get(String(agent.id)) !== entry) return
       entry.ref.current = slot
       if (extra.image?.description !== undefined) {
         entry.ref.imageDescription = `[Image Description: ${extra.image.description}]`
@@ -1124,6 +1153,8 @@ export function apply(ctx, config) {
       try { dispose() } catch { /* already disposed */ }
     }
     orchestrationLive.clear()
+    if (startupTimer !== undefined) clearTimeout(startupTimer)
+    startupTimer = undefined
     cache.flush()
     visionCache.flush()
   }, 'model-router: agents')
