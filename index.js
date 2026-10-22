@@ -415,6 +415,9 @@ export function apply(ctx, config) {
   const warned = new Set()
   const decisions = new Map()
   const verdicts = new Map()
+  // Sessions this plugin actually routed. Kept until `subagent/end` reports
+  // how the child finished, so the trace can carry an outcome next to the choice.
+  const routed = new Map()
   const orchestrationLive = new Map()
   const live = new Map()
   let banner = ''
@@ -844,6 +847,8 @@ export function apply(ctx, config) {
     } catch { /* section host may be absent in this scope */ }
     const disposeRequest = agent.ctx.on('agent/request', async (_payload, next) => {
       const base = await next()
+      const stats = routed.get(key)
+      if (stats !== undefined) stats.requests += 1
       if (ref.pending !== undefined) {
         // A stuck decision must not block the model request forever; the static
         // chain is a safe fallback because ref.current stays undefined.
@@ -1052,6 +1057,11 @@ export function apply(ctx, config) {
         entry.ref.imageDescription = `[Image Description: ${extra.image.description}]`
       }
       decisions.set(String(agent.id), { slot })
+      if (routed.size >= 500) {
+        const oldest = routed.keys().next().value
+        if (oldest !== undefined) routed.delete(oldest)
+      }
+      routed.set(String(agent.id), { at: Date.now(), requests: 0, via: extra.via, provider: slot?.provider ?? null, model: slot?.model ?? null })
       const record = {
         session: String(agent.id),
         via: extra.via,
@@ -1129,6 +1139,30 @@ export function apply(ctx, config) {
     entry.pending = pending
   }))
 
+  // Terminal outcome of a routed child: pair the settled run with the choice
+  // this plugin made, so the trace answers "what was chosen, and how did it go".
+  ctx.on('subagent/end', guarded('subagent/end', (info) => {
+    const key = String(info?.id ?? '')
+    if (key === '') return
+    const stats = routed.get(key)
+    if (stats === undefined) return
+    routed.delete(key)
+    const blocks = Array.isArray(info.lastAssistantMessage) ? info.lastAssistantMessage : []
+    const outputChars = blocks.reduce((total, block) => total + (typeof block?.text === 'string' ? block.text.length : 0), 0)
+    trace({
+      event: 'outcome',
+      session: key,
+      runId: info.runId ?? null,
+      provider: info.provider ?? null,
+      local: info.local === true,
+      stopReason: info.stopReason ?? 'unknown',
+      via: stats.via ?? null,
+      durationMs: Math.max(0, Date.now() - stats.at),
+      requests: stats.requests,
+      outputChars,
+    })
+  }))
+
   ctx.on('agent/disposed', guarded('agent/disposed', ({ agent }) => {
     live.get(String(agent.id))?.dispose()
     decisions.delete(String(agent.id))
@@ -1163,6 +1197,7 @@ export function apply(ctx, config) {
     live.clear()
     decisions.clear()
     verdicts.clear()
+    routed.clear()
     for (const dispose of orchestrationLive.values()) {
       try { dispose() } catch { /* already disposed */ }
     }

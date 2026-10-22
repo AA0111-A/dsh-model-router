@@ -207,6 +207,28 @@ tail -f .model-router/router-trace.jsonl | jq '.'
 
 `via` 取值：`cache` / `pool` / `head` / `fallback` / `fallback-static` / `vision:*` / `inherit-parent`。
 
+### 结果事件
+
+子代理结束时，插件再补一行 `outcome`，与同一 `session` 的决策配对：
+
+```json
+{"at":"…","event":"outcome","session":"session-…","runId":"…","provider":"local","local":true,"stopReason":"completed","via":"pool","durationMs":312000,"requests":7,"outputChars":1840}
+```
+
+`stopReason` 来自 DSH 的子代理生命周期：`completed` / `aborted` / `error` / `max-tokens` / `refusal`。这样 trace 能回答「选了什么、跑完没有、花了多久、发了几次请求」，而不只是「选了谁」。
+
+### 巡检报告（零 token）
+
+```bash
+node scripts/router-report.mjs            # 近 7 天，写 reports/latest.md 并打印摘要
+node scripts/router-report.mjs --hours 24 # 只看最近一天
+node scripts/router-report.mjs --json     # 机器可读摘要，给 agent 读
+```
+
+报告聚合缓存命中率、兜底率、头领失败、按模型的成功/失败与耗时、编排判定分布，并给出异常提示（命中率过低、兜底过高、失败率异常、决策无结果等）。脚本只读，不改缓存。
+
+让 agent 做定期复盘时用配套提示词 [prompts/router-audit.md](prompts/router-audit.md)：固定读 `--json` 摘要，不吞原始 trace。
+
 ---
 
 ## 缓存与隐私

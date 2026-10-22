@@ -16,6 +16,7 @@ package-lock.json
 .model-router/
 routing_cache.json
 vision_cache.json
+reports/
 *.jsonl
 *.log
 
