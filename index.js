@@ -418,6 +418,9 @@ export function apply(ctx, config) {
   // Sessions this plugin actually routed. Kept until `subagent/end` reports
   // how the child finished, so the trace can carry an outcome next to the choice.
   const routed = new Map()
+  // Per-root orchestration state (last turn + last verdict) so inbox-time and
+  // pre-step assessment agree.
+  const assessments = new Map()
   const orchestrationLive = new Map()
   const live = new Map()
   let banner = ''
@@ -449,6 +452,37 @@ export function apply(ctx, config) {
     } catch {
       return false
     }
+  }
+
+  const FOLLOW_UP = /再来一次|再查一次|再检查|重新查|重新检查|继续查|复测|再跑|再审查|重新审|rerun|recheck|again/i
+
+  /**
+   * Assess a root-session message and publish the verdict.
+   *
+   * Must run when the message enters the inbox: the system prompt is assembled
+   * *before* `agent/pre-step` handlers run, so a verdict set there only reaches
+   * the next step — and a single-step turn would show the previous message's
+   * verdict (or none at all).
+   */
+  const assessRoot = (agent, message) => {
+    const key = String(agent.id)
+    const text = textOf(message)
+    if (text === '') return undefined
+    const state = assessments.get(key) ?? {}
+    let assessment = assessTask(text, message)
+    // A terse follow-up like "改过了，再查一次" is context-heavy work: when the
+    // previous turn was heavy, keep it heavy instead of downgrading it.
+    if (assessment.verdict !== 'heavy' && state.lastVerdict === 'heavy' && text.length < 60 && FOLLOW_UP.test(text)) {
+      assessment = {
+        ...assessment,
+        verdict: 'heavy',
+        score: Math.max(assessment.score, 3),
+        reasons: [...assessment.reasons, '延续上轮重活'],
+      }
+    }
+    assessments.set(key, { ...state, lastVerdict: assessment.verdict })
+    verdicts.set(key, assessment)
+    return assessment
   }
 
   /** Vision first when the task needs it, then role, then the difficulty tier. */
@@ -749,7 +783,11 @@ export function apply(ctx, config) {
           text: '你是执行者：只完成交给你的任务，不要再调用 subagent / spawn_teammate 派生新的代理或团队；完成后直接汇报结果。',
         })
       } else {
-        const section = agent.ctx.systemPrompt.section({
+        // A runtime *context*, not a prompt section: contexts are resolved when
+        // the request is built, i.e. after the pre-step handler below publishes
+        // the verdict, so the model sees the verdict for the current message.
+        // A section is assembled earlier and would show the previous turn's.
+        const context = agent.ctx.systemPrompt.context({
           name: 'model-router:orchestration',
           order: 987,
           text: () => {
@@ -757,36 +795,22 @@ export function apply(ctx, config) {
             return assessment === undefined ? '' : verdictText(assessment, { healTool: cfg.orchestration.healTool })
           },
         })
-        // Compute the verdict in pre-step, i.e. after the inbox event but before
-        // this step's prompt is assembled. Computing it only on inbox insertion
-        // made the prompt show the *previous* message's verdict (one-turn lag).
-        let lastTurn
-        let lastVerdict
-        const followUp = /再来一次|再查一次|再检查|重新查|重新检查|继续查|复测|再跑|再审查|重新审|rerun|recheck|again/i
+        // Re-assess on pre-step as well: inbox insertion covers the first step,
+        // this keeps later steps of the same turn consistent (e.g. after tool
+        // calls) and emits the trace line exactly once per turn.
         const preStep = agent.ctx.on('agent/pre-step', async (payload, next) => {
           const decision = await next()
           if (!cfg.orchestration.enabled) return decision
           const turn = payload?.turn
-          if (turn !== undefined && turn === lastTurn) return decision
+          const state = assessments.get(key) ?? {}
+          if (turn !== undefined && turn === state.lastTurn) return decision
           const messages = Array.isArray(payload?.messages) ? payload.messages : []
           const lastUser = [...messages].reverse().find((message) => message?.role === 'user')
           const text = lastUser === undefined ? '' : textOf(lastUser)
           if (text === '') return decision
-          let assessment = assessTask(text, lastUser)
-          // A terse follow-up like "改过了，再查一次" is context-heavy work:
-          // when the previous turn was a heavy delegation, keep it heavy instead
-          // of downgrading it to a light direct answer.
-          if (assessment.verdict !== 'heavy' && lastVerdict === 'heavy' && text.length < 60 && followUp.test(text)) {
-            assessment = {
-              ...assessment,
-              verdict: 'heavy',
-              score: Math.max(assessment.score, 3),
-              reasons: [...assessment.reasons, '延续上轮重活'],
-            }
-          }
-          verdicts.set(key, assessment)
-          lastTurn = turn
-          lastVerdict = assessment.verdict
+          const assessment = assessRoot(agent, lastUser)
+          if (assessment === undefined) return decision
+          assessments.set(key, { ...(assessments.get(key) ?? {}), lastTurn: turn })
           trace({
             event: 'orchestration',
             session: key,
@@ -802,7 +826,7 @@ export function apply(ctx, config) {
           return decision
         })
         dispose = () => {
-          try { section?.() } catch { /* already disposed */ }
+          try { context?.() } catch { /* already disposed */ }
           try { preStep?.() } catch { /* already disposed */ }
         }
       }
@@ -1037,7 +1061,25 @@ export function apply(ctx, config) {
   }))
 
   ctx.on('agent/inbox/inserted', guarded('agent/inbox/inserted', ({ agent, message }) => {
-    if (!isManaged(agent)) return
+    if (!isManaged(agent)) {
+      // Publish the root-session verdict while the message enters the inbox,
+      // i.e. before the step's system prompt is assembled. The payload shape
+      // differs across DSH versions, so rely on the text instead of `source`.
+      const text = textOf(message)
+      const internal = text === '' || text.startsWith('Current runtime context') || /^(Background subagent|Agent [0-9a-f-]{6,}\b)/i.test(text)
+      if (!internal) {
+        const assessment = assessRoot(agent, message)
+        trace({
+          event: 'inbox-assess',
+          session: String(agent.id),
+          source: message?.source?.kind ?? null,
+          role: message?.role ?? null,
+          verdict: assessment?.verdict ?? null,
+          head: text.slice(0, 60).replaceAll('\n', ' '),
+        })
+      }
+      return
+    }
     const text = textOf(message)
     const entry = install(agent)
     if (entry.decided) return
@@ -1167,6 +1209,7 @@ export function apply(ctx, config) {
     live.get(String(agent.id))?.dispose()
     decisions.delete(String(agent.id))
     verdicts.delete(String(agent.id))
+    assessments.delete(String(agent.id))
     const disposeOrchestration = orchestrationLive.get(String(agent.id))
     orchestrationLive.delete(String(agent.id))
     try { disposeOrchestration?.() } catch { /* already disposed */ }
@@ -1198,6 +1241,7 @@ export function apply(ctx, config) {
     decisions.clear()
     verdicts.clear()
     routed.clear()
+    assessments.clear()
     for (const dispose of orchestrationLive.values()) {
       try { dispose() } catch { /* already disposed */ }
     }
