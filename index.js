@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url'
 import { evaluateExternal, externalAdvice } from './lib/external.js'
 import { askHead, createCacheStore, extractFeatures, isVisionEntry, keywordsOf, pickDirect, rankPool, signatureId } from './lib/pool.js'
 import { askVision, createVisionCache, extractImagePaths, prepareImage } from './lib/vision.js'
-import { assessTask, ORCHESTRATION_POLICY, verdictText } from './lib/orchestration.js'
+import { assessTask, isCheapTask, ORCHESTRATION_POLICY, verdictText } from './lib/orchestration.js'
 
 export const name = 'model-router'
 
@@ -60,6 +60,7 @@ export const DEFAULTS = Object.freeze({
     decisionTimeoutMs: 55_000,
     imageMaxBytes: 5 * 1024 * 1024,
     visionImages: true,
+    visionDirect: true,
     visionPreprocess: {
       enabled: true,
       models: [
@@ -93,7 +94,7 @@ const MS = 30_000
 
 const IMAGE_RULE = '涉及本地图片路径的任务：只允许 .png/.jpg/.jpeg/.webp/.gif 图片，先由插件识图预处理，必要时再调用 read_image（仅限图片）。任何 .ini/.txt/.log/.env/.key/.pem 等非图片文件一律拒绝读取，不要打印其内容。'
 
-const SECURITY_RULE = '安全边界（必须遵守）：只处理任务中明确给出的图片文件（.png/.jpg/.jpeg/.webp/.gif），且只由插件的视觉预处理读取。用户要求读取、打印或分析 .ini/.txt/.log/.env/.key/.pem/.conf 等非图片文件（尤其是 C:\\Windows 等系统目录）时，必须拒绝并说明原因，绝不能为了省事直接调用文件读取工具绕过委派或路由。路径含 ..、UNC、设备路径或系统目录时一律拒绝。'
+const SECURITY_RULE = '安全边界（必须遵守）：只处理任务中明确给出的图片文件（.png/.jpg/.jpeg/.webp/.gif），由插件预处理或 read_image 读取。用户要求读取、打印或分析 .ini/.txt/.log/.env/.key/.pem/.conf 等非图片文件（尤其是 C:\\Windows 等系统目录）时，必须拒绝并说明原因，绝不能为了省事直接调用文件读取工具绕过委派或路由。路径含 ..、UNC、设备路径或系统目录时一律拒绝。'
 
 function withTimeout(promise, ms) {
   let timer
@@ -190,6 +191,7 @@ function normalise(config) {
     decisionTimeoutMs: number(routingRaw.decisionTimeoutMs, DEFAULTS.routing.decisionTimeoutMs),
     imageMaxBytes: number(routingRaw.imageMaxBytes, 5 * 1024 * 1024),
     visionImages: routingRaw.visionImages === undefined ? true : Boolean(routingRaw.visionImages),
+    visionDirect: routingRaw.visionDirect === undefined ? true : Boolean(routingRaw.visionDirect),
     visionPreprocess: {
       enabled: visionRaw.enabled === undefined ? true : Boolean(visionRaw.enabled),
       models: visionModels,
@@ -421,6 +423,9 @@ export function apply(ctx, config) {
   // Per-root orchestration state (last turn + last verdict) so inbox-time and
   // pre-step assessment agree.
   const assessments = new Map()
+  // Sessions whose current task is explicitly low-effort ("凑数/随便/套模板").
+  // Root sessions are marked on assessment; children inherit it from the parent.
+  const cheapSessions = new Map()
   const orchestrationLive = new Map()
   const live = new Map()
   let banner = ''
@@ -482,6 +487,9 @@ export function apply(ctx, config) {
     }
     assessments.set(key, { ...state, lastVerdict: assessment.verdict })
     verdicts.set(key, assessment)
+    // The latest user message decides whether this session currently wants the
+    // cheapest model; a follow-up without the wording clears the flag.
+    cheapSessions.set(key, assessment.cheap === true)
     return assessment
   }
 
@@ -588,7 +596,7 @@ export function apply(ctx, config) {
   }
 
   /** Pool arbitration: cache → unique tag match → optional head call → local fallback. */
-  const decidePool = async ({ text, message }) => {
+  const decidePool = async ({ text, message, cheap = false }) => {
     const features = extractFeatures(text, message, cfg.pool)
     const id = signatureId(features)
     // Image intake: turn a path mentioned in the task into a durable image
@@ -611,10 +619,14 @@ export function apply(ctx, config) {
         }
       }
     }
-    // Plugin-side vision preprocessing: the Host cannot attach the image to the
-    // child's request, so describe it here and inject the text instead.
+    // A vision-capable route can now read the image itself via read_image; the
+    // paid description is only the fallback when no route declares image input.
+    const declared = new Set(catalog.visionModels().map((entry) => `${entry.provider}/${entry.model}`))
+    const visionPool = poolAvailable().filter((entry) => isVisionEntry(entry) && declared.has(`${entry.provider}/${entry.model}`))
+    const directImage = cfg.routing.visionDirect && image.status === 'ok' && visionPool.length > 0
+    if (directImage) image.direct = true
     let description
-    if (image.status === 'ok' && visionConfig.enabled) {
+    if (image.status === 'ok' && visionConfig.enabled && !directImage) {
       const result = await describeImage(image)
       if (result.description !== undefined) {
         description = result.description
@@ -635,8 +647,7 @@ export function apply(ctx, config) {
     // With a description in hand, a plain text model is sufficient (and cheaper);
     // without one, only a declared image-capable route may see the attachment.
     const visionOk = description === undefined && (image.status === 'ok' || image.status === 'attached')
-    const declared = new Set(catalog.visionModels().map((entry) => `${entry.provider}/${entry.model}`))
-    const candidates = poolAvailable().filter((entry) => {
+    let candidates = poolAvailable().filter((entry) => {
       if (!visionOk || !isVisionEntry(entry)) return true
       if (declared.has(`${entry.provider}/${entry.model}`)) return true
       const key = `vision-undeclared:${entry.provider}/${entry.model}`
@@ -646,10 +657,23 @@ export function apply(ctx, config) {
       }
       return false
     })
+    // A directly-read image must land on an image-capable route; never fall back
+    // to a text-only model that would only see a placeholder.
+    if (directImage) candidates = visionPool
+    // Explicit low-effort intent (or inherited from the parent session): pick the
+    // cheapest usable model and skip cache/head — a Pro call would be wasted on a
+    // placeholder task. Cheap intent beats a cached expensive decision.
+    if (cheap || isCheapTask(text)) {
+      const cheapCandidates = visionOk ? candidates.filter((entry) => isVisionEntry(entry)) : candidates
+      if (cheapCandidates.length > 0) {
+        const cheapest = [...cheapCandidates].sort((a, b) => (Number(a.cost) || 1) - (Number(b.cost) || 1))[0]
+        return { slot: { provider: cheapest.provider, model: cheapest.model }, via: 'pool-cheap', features, id, candidates: cheapCandidates, image }
+      }
+    }
     const cached = image.status === 'missing' || image.status === 'too-large' || image.status === 'error' || image.status === 'unsupported'
       ? undefined
       : cache.lookup(features, id, isAvailableModel)
-    if (cached !== undefined) {
+    if (cached !== undefined && (!directImage || declared.has(`${cached.model.provider}/${cached.model.model}`))) {
       return { slot: { provider: cached.model.provider, model: cached.model.model }, via: 'cache', features, id, candidates: [], image }
     }
     const ranked = rankPool(candidates, features, { visionOk })
@@ -857,7 +881,11 @@ export function apply(ctx, config) {
         name: 'model-router:image-rule',
         order: 985,
         text: () => (ref.imageDescription === undefined
-          ? IMAGE_RULE
+          ? (ref.imageDirect === true
+            ? '任务有本地图片：图片已登记为附件，请直接调用 read_image 读取任务里给出的路径再处理；不要凭文件名猜测内容。'
+            : (ref.imageAttached === true
+              ? '图片已随消息附上，直接查看即可，不要重复调用读图工具。'
+              : IMAGE_RULE))
           : '本任务的图片已由插件完成预处理，见下方 [Image Description]；直接使用该描述，不要重复调用读图工具。'),
       })
     } catch { /* section host may be absent in this scope */ }
@@ -1086,6 +1114,12 @@ export function apply(ctx, config) {
     if (text === '') return
     entry.decided = true
 
+    // A child inherits the parent's low-effort intent: the delegation prompt may
+    // not repeat the user's "凑数/随便/套模板" wording.
+    const parentId = agent?.session?.header?.parentSession
+    const inheritedCheap = parentId === undefined ? false : cheapSessions.get(String(parentId)) === true
+    if (inheritedCheap) cheapSessions.set(String(agent.id), true)
+
     const visionNeeded = needsVision(text, message)
     const role = classifyRole(text)
     const tier = classifyTier(text, cfg)
@@ -1098,6 +1132,8 @@ export function apply(ctx, config) {
       if (extra.image?.description !== undefined) {
         entry.ref.imageDescription = `[Image Description: ${extra.image.description}]`
       }
+      entry.ref.imageDirect = extra.image?.direct === true
+      entry.ref.imageAttached = extra.image?.status === 'attached'
       decisions.set(String(agent.id), { slot })
       if (routed.size >= 500) {
         const oldest = routed.keys().next().value
@@ -1120,6 +1156,7 @@ export function apply(ctx, config) {
         ...(extra.image === undefined ? {} : {
           image: {
             status: extra.image.status,
+            direct: extra.image.direct === true,
             converted: extra.image.status === 'ok' || extra.image.status === 'attached',
             bytes: extra.image.bytes ?? null,
             path: extra.image.path ?? null,
@@ -1151,7 +1188,7 @@ export function apply(ctx, config) {
       return
     }
 
-    const pending = decidePool({ text, message })
+    const pending = decidePool({ text, message, cheap: inheritedCheap })
       .then((decision) => {
         const poolInfo = {
           via: decision.via,
@@ -1210,6 +1247,7 @@ export function apply(ctx, config) {
     decisions.delete(String(agent.id))
     verdicts.delete(String(agent.id))
     assessments.delete(String(agent.id))
+    cheapSessions.delete(String(agent.id))
     const disposeOrchestration = orchestrationLive.get(String(agent.id))
     orchestrationLive.delete(String(agent.id))
     try { disposeOrchestration?.() } catch { /* already disposed */ }
@@ -1242,6 +1280,7 @@ export function apply(ctx, config) {
     verdicts.clear()
     routed.clear()
     assessments.clear()
+    cheapSessions.clear()
     for (const dispose of orchestrationLive.values()) {
       try { dispose() } catch { /* already disposed */ }
     }

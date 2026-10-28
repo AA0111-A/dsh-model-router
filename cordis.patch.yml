@@ -27,6 +27,8 @@
           decisionTimeoutMs: 55000
           imageMaxBytes: 5242880
           visionImages: true
+          # 有视觉模型时直读图片（子代理 read_image），跳过付费描述
+          visionDirect: true
           cacheFile: './.model-router/routing_cache.json'
           cacheMaxEntries: 300
           cacheTtlDays: 30
@@ -49,7 +51,7 @@
             enabled: true
             provider: deepseek-official
             model: deepseek-v4-pro
-            timeoutMs: 8000
+            timeoutMs: 25000
             maxCallsPerMinute: 6
         vision:
           provider: ''
